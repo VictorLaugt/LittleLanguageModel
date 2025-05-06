@@ -4,7 +4,7 @@ import abc
 
 class LanguageModelInterface(nn.Module, abc.ABC):
     @abc.abstractmethod
-    def initial_hidden_states(self, batch_size=None):
+    def initial_hidden_states(self, device, batch_size=None):
         """Returns the default hidden states of the model to use when predicting
         without any context.
 
