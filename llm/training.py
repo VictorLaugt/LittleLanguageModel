@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import time
+import abc
 
 from llm.data import iter_sub_sequences
 
@@ -12,10 +13,27 @@ if TYPE_CHECKING:
     from typing import Optional
     from torch.optim import Optimizer
     from torch.optim.lr_scheduler import LRScheduler
-    from llm.abstract_language_model import LanguageModelInterface
+    from llm.abstract_language_model import LanguageModelInterface, ReccurentLanguageModelInterface
 
 
-class TrainingLoop:
+class TrainingLogs:
+    def __init__(self):
+        self._start_time = 0.
+
+        self.train_loss = []
+        self.valid_loss = []
+        self.lr = []
+        self.ellapsed_time = 0.
+
+    def __enter__(self):
+        self._start_time = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        self.ellapsed_time = time.perf_counter() - self._start_time
+
+
+class AbstractLMTrainingLoop(abc.ABC):
     def __init__(
         self,
         device: torch.device,
@@ -52,13 +70,11 @@ class TrainingLoop:
         else:
             self.update_lr = self._update_lr
 
-
     def _criterion_no_batch(self, logits, target_seq):
         return self.cross_entropy(logits, target_seq)
 
     def _criterion_batch(self, logits, target_seq):
         return self.cross_entropy(logits.permute(0, 2, 1), target_seq)
-
 
     def _update_lr(self, _: float) -> float:
         self.scheduler.step()
@@ -70,38 +86,6 @@ class TrainingLoop:
 
     def _update_lr_constant(self, _: float) -> float:
         return self.optimizer.param_groups[0]['lr']
-
-
-    def train(self) -> float:
-        epoch_loss = .0
-        self.model.train()
-
-        hidden_states = self.model.initial_hidden_states(self.device, self.batch_size)
-        for input_seq, target_seq in iter_sub_sequences(self.train_dataset, self.seq_length, self.batch_size):
-            self.optimizer.zero_grad()
-            hidden_states = self.model.detach_hidden_states(hidden_states)
-
-            logits, hidden_states = self.model(input_seq, hidden_states)
-            loss = self.criterion(logits, target_seq)
-
-            loss.backward()
-            self.optimizer.step()
-
-            epoch_loss += loss.item() * len(input_seq)
-
-        return epoch_loss / len(self.train_dataset)
-
-    def evaluate(self) -> float:
-        epoch_loss = .0
-        self.model.eval()
-
-        with torch.no_grad():
-            hidden_states = self.model.initial_hidden_states(self.device, self.batch_size)
-            for input_seq, target_seq in iter_sub_sequences(self.valid_dataset, self.seq_length, self.batch_size):
-                logits, hidden_states = self.model(input_seq, hidden_states)
-                epoch_loss += self.criterion(logits, target_seq).item() * len(input_seq)
-
-        return epoch_loss / len(self.valid_dataset)
 
     def run(self, logs: Optional[TrainingLogs]=None) -> TrainingLogs:
         logs = logs or TrainingLogs()
@@ -118,7 +102,8 @@ class TrainingLoop:
             logs.train_loss.append(train_loss)
             logs.valid_loss.append(valid_loss)
             logs.lr.append(lr)
-            if epoch % 100 == 0 or epoch == self.n_epochs-1:
+            # if epoch % 100 == 0 or epoch == self.n_epochs-1:
+            if epoch % 20 == 0 or epoch == self.n_epochs-1:
                 print(
                     f"epoch {epoch:5d}/{self.n_epochs-1}: "
                     f"train loss = {train_loss:.6f}, "
@@ -128,18 +113,86 @@ class TrainingLoop:
 
         return logs
 
-class TrainingLogs:
-    def __init__(self):
-        self._start_time = 0.
+    @abc.abstractmethod
+    def train(self) -> float:
+        pass
 
-        self.train_loss = []
-        self.valid_loss = []
-        self.lr = []
-        self.ellapsed_time = 0.
+    @abc.abstractmethod
+    def evaluate(self) -> float:
+        pass
 
-    def __enter__(self):
-        self._start_time = time.perf_counter()
-        return self
 
-    def __exit__(self, exc_type, exc_value, exc_tb):
-        self.ellapsed_time = time.perf_counter() - self._start_time
+class ReccurentLMTrainingLoop(AbstractLMTrainingLoop):
+    model: ReccurentLanguageModelInterface
+
+    def train(self) -> float:
+        self.model.train()
+
+        epoch_loss = .0
+        token_count = 0
+        hidden_states = self.model.initial_hidden_states(self.device, self.batch_size)
+        for input_seq, target_seq in iter_sub_sequences(self.train_dataset, self.seq_length, self.batch_size):
+            self.optimizer.zero_grad()
+            hidden_states = self.model.detach_hidden_states(hidden_states)
+
+            logits, hidden_states = self.model(input_seq, hidden_states)
+            loss = self.criterion(logits, target_seq)
+
+            loss.backward()
+            self.optimizer.step()
+
+            n_tokens = input_seq.numel()
+            epoch_loss += loss.item() * n_tokens
+            token_count += n_tokens
+
+        return epoch_loss / token_count
+
+    def evaluate(self) -> float:
+        self.model.eval()
+
+        epoch_loss = .0
+        token_count = 0
+        with torch.no_grad():
+            hidden_states = self.model.initial_hidden_states(self.device, self.batch_size)
+            for input_seq, target_seq in iter_sub_sequences(self.valid_dataset, self.seq_length, self.batch_size):
+                logits, hidden_states = self.model(input_seq, hidden_states)
+                n_tokens = input_seq.numel()
+                epoch_loss += self.criterion(logits, target_seq).item() * n_tokens
+                token_count += n_tokens
+
+        return epoch_loss / token_count
+
+class TransformerLMTrainingLoop(AbstractLMTrainingLoop):
+    def train(self) -> float:
+        self.model.train()
+
+        epoch_loss = .0
+        token_count = 0
+        for input_seq, target_seq in iter_sub_sequences(self.train_dataset, self.seq_length, self.batch_size):
+            self.optimizer.zero_grad()
+
+            logits = self.model(input_seq)
+            loss = self.criterion(logits, target_seq)
+
+            loss.backward()
+            self.optimizer.step()
+
+            n_tokens = input_seq.numel()
+            epoch_loss += loss.item() * n_tokens
+            token_count += n_tokens
+
+        return epoch_loss / token_count
+
+    def evaluate(self) -> float:
+        self.model.eval()
+
+        epoch_loss = .0
+        token_count = 0
+        with torch.no_grad():
+            for input_seq, target_seq in iter_sub_sequences(self.valid_dataset, self.seq_length, self.batch_size):
+                logits = self.model(input_seq)
+                n_tokens = input_seq.numel()
+                epoch_loss += self.criterion(logits, target_seq).item() * n_tokens
+                token_count += n_tokens
+
+        return epoch_loss / token_count

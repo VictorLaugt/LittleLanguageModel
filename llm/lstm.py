@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
-from llm.abstract_language_model import LanguageModelInterface
+from llm.abstract_language_model import ReccurentLanguageModelInterface
 
 
-class CharLSTM(LanguageModelInterface):
+class CharLSTM(nn.Module, ReccurentLanguageModelInterface):
     def __init__(self, vocab_size, embedding_dim, hidden_dim, num_layers=1, dropout=0.0):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
@@ -76,7 +76,7 @@ class CharLSTM(LanguageModelInterface):
         logits, hidden_states = self(context, hidden_states)
         last_predicted_token = logits[-1].unsqueeze(0).argmax(dim=-1)  # [1,] or [1, batch_size]
 
-        predicted_tokens = torch.empty(n_predictions, *context.size()[1:])
+        predicted_tokens = torch.empty((n_predictions, *context.size()[1:]), dtype=torch.int64)
         predicted_tokens[0] = last_predicted_token
         for p in range(1, n_predictions):
             logits, hidden_states = self(last_predicted_token, hidden_states)
@@ -108,8 +108,7 @@ class CharLSTM(LanguageModelInterface):
 
         logits, hidden_states = self(context, hidden_states)
         last_predicted_token = Categorical(logits=logits[-1].unsqueeze(0)).sample()  # [1,] or [1, batch_size]
-
-        predicted_tokens = torch.empty(n_predictions, *context.size()[1:])
+        predicted_tokens = torch.empty((n_predictions, *context.size()[1:]), dtype=torch.int64)
         predicted_tokens[0] = last_predicted_token
         for p in range(1, n_predictions):
             logits, hidden_states = self(last_predicted_token, hidden_states)
